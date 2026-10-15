@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Signing: put your key details in keystore.properties next to this project's
+// settings.gradle (see keystore.properties.example). Without that file, release
+// builds are unsigned and debug builds use Android Studio's debug key.
+def ksFile = rootProject.file('keystore.properties')
+def ks = new Properties()
+if (ksFile.exists()) ks.load(new FileInputStream(ksFile))
+
+android {
+    namespace 'com.superbased.multistream'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.superbased.multistream'
+        minSdk 26          // Android 8.0: first version with picture-in-picture for phones
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        // The site this app shows. Change it if you move the server.
+        buildConfigField 'String', 'SITE_URL', '"https://multistream-2erp.onrender.com/"'
+    }
+
+    buildFeatures { buildConfig true }
+
+    signingConfigs {
+        release {
+            if (ksFile.exists()) {
+                storeFile rootProject.file(ks['storeFile'])
+                storePassword ks['storePassword']
+                keyAlias ks['keyAlias']
+                keyPassword ks['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (ksFile.exists()) signingConfig signingConfigs.release
+        }
+    }
+
+    lint {
+        // Don't fail the build over lint findings (WebView apps trip a few warnings by design).
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
