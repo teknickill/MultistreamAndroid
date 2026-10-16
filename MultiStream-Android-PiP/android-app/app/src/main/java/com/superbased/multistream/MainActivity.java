@@ -19,10 +19,13 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.webkit.ConsoleMessage;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -35,7 +38,12 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,6 +60,9 @@ import java.util.concurrent.Executors;
  * - Links that leave the site (Open on YouTube, pop-out chat) open in the
  *   browser / YouTube app instead of replacing the page.
  * - YouTube sign-in for the chats (window.MultiStreamAndroid.signIn / signOut).
+ * - Native YouTube panels (panelOpen / panelPlace / panelClose): the page marks
+ *   a spot and the app draws a real YouTube page there (used for live chats,
+ *   so they're first-party: every option, the app's own login).
  * - Search and @handle lookups run on the phone itself (ytFetch): the app
  *   downloads the youtube.com page and the web page reads it. No server, no
  *   API key, and each phone uses its own connection.
@@ -76,6 +87,113 @@ public class MainActivity extends Activity {
     private LinearLayout signInLayer;   // full-screen Google sign-in page, when open
     private WebView signInWeb;
     private boolean signInDone = false;
+    // Native YouTube panels, drawn over the page where it asks (chats).
+    private FrameLayout panelLayer;
+    private final Map<String, Panel> panels = new HashMap<String, Panel>();
+
+    /** One panel: a clipping box at the visible part, the full-size page inside it. */
+    private static class Panel {
+        FrameLayout clip;
+        WebView view;
+        String url;
+        int cw = -1, ch = -1, fw = -1, fh = -1;
+    }
+
+    // Recent errors from the YouTube pages the app shows (chats), for "Copy chat debug info".
+    private final ArrayDeque<String> debugLog = new ArrayDeque<String>();
+    private String webUa = "";
+
+    private void addDebug(String line) {
+        synchronized (debugLog) {
+            String t = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(new java.util.Date());
+            debugLog.addLast(t + " " + (line.length() > 300 ? line.substring(0, 300) + "…" : line));
+            while (debugLog.size() > 80) debugLog.removeFirst();
+        }
+    }
+
+    private static String shortUrl(String u) {
+        if (u == null) return "";
+        int q = u.indexOf('?');
+        return q > 0 ? u.substring(0, q) : u;    // no query strings (they can hold tokens)
+    }
+
+    /** Page client for the app's YouTube pages: records failures for the debug info. */
+    private class LoggingClient extends WebViewClient {
+        final String tag;
+        LoggingClient(String tag) { this.tag = tag; }
+
+        @Override
+        public void onReceivedHttpError(WebView v, WebResourceRequest req, WebResourceResponse res) {
+            addDebug(tag + " http " + res.getStatusCode() + " " + req.getMethod() + " " + shortUrl(req.getUrl().toString()));
+        }
+
+        @Override
+        public void onReceivedError(WebView v, WebResourceRequest req, WebResourceError err) {
+            addDebug(tag + " net " + err.getDescription() + " " + shortUrl(req.getUrl().toString()));
+        }
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            addDebug(tag + " loaded " + shortUrl(url) + " signedIn=" + isSignedIn());
+        }
+    }
+
+    /** Pop-ups, dialogs and console messages for the app's YouTube pages. */
+    private WebChromeClient youtubeChrome(final String tag) {
+        return new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage m) {
+                ConsoleMessage.MessageLevel lv = m.messageLevel();
+                if (lv == ConsoleMessage.MessageLevel.ERROR || lv == ConsoleMessage.MessageLevel.WARNING) {
+                    addDebug(tag + " console " + lv + ": " + m.message() + " @" + shortUrl(m.sourceId()) + ":" + m.lineNumber());
+                }
+                return false;
+            }
+
+            // A page opening a new window: YouTube pages full screen in the app, others in the browser.
+            @Override
+            public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+                addDebug(tag + " window.open");
+                final WebView catcher = new WebView(MainActivity.this);
+                catcher.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                        String u = req.getUrl().toString();
+                        if (isYouTubePage(u)) {
+                            if (signInLayer != null && signInWeb != null) signInWeb.loadUrl(u);
+                            else showOverlay(u, false);
+                        } else {
+                            openOutside(req.getUrl());
+                        }
+                        catcher.destroy();
+                        return true;
+                    }
+                });
+                WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+                transport.setWebView(catcher);
+                resultMsg.sendToTarget();
+                return true;
+            }
+        };
+    }
+
+    private String debugInfo() {
+        StringBuilder b = new StringBuilder();
+        b.append("MultiStream app debug\n");
+        b.append("Android SDK ").append(Build.VERSION.SDK_INT).append("\n");
+        b.append("WebView UA: ").append(webUa).append("\n");
+        b.append("Signed in: ").append(isSignedIn()).append("\n");
+        ArrayList<String> urls = new ArrayList<String>();
+        try { for (Panel p : panels.values()) urls.add(shortUrl(p.url)); } catch (RuntimeException ignored) { /* changing */ }
+        b.append("Chats open: ").append(urls.size()).append("\n");
+        for (String u : urls) b.append("  ").append(u).append("\n");
+        b.append("Recent:\n");
+        synchronized (debugLog) { for (String l : debugLog) b.append(l).append("\n"); }
+        return b.toString();
+    }
+
+    private boolean overlayIsSignIn = true;     // sign-in page (closes itself) or a YouTube page (chat)
+    private boolean overlayStartedSignedIn = false;
 
     // ytFetch: downloaded YouTube pages waiting for the web page to take them.
     private final Map<String, String> fetched = new ConcurrentHashMap<String, String>();
@@ -101,6 +219,10 @@ public class MainActivity extends Activity {
         web.setBackgroundColor(BG);
         root.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Above the page, below sign-in/full chat. Empty areas pass touches through.
+        panelLayer = new FrameLayout(this);
+        root.addView(panelLayer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
         keepClearOfSystemBars();
 
@@ -111,6 +233,7 @@ public class MainActivity extends Activity {
         s.setSupportMultipleWindows(true);             // window.open -> onCreateWindow below
         s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setUserAgentString(s.getUserAgentString() + " MultiStreamAndroid/1.0");
+        webUa = s.getUserAgentString();
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);  // YouTube chat sign-in
 
@@ -139,6 +262,8 @@ public class MainActivity extends Activity {
                 root.addView(view, new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 web.setVisibility(View.GONE);
+                panelLayer.bringToFront();          // a full-screen stream keeps its chat
+                if (signInLayer != null) signInLayer.bringToFront();
                 setSystemBarsHidden(true);
             }
 
@@ -199,34 +324,68 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------- YouTube sign-in
     // Google's sign-in page, full screen over the app, with a Done button.
     // Closes by itself once Google sends you back to YouTube.
-    private void showSignIn() {
+    private void showSignIn() { showOverlay(SIGN_IN_URL, true); }
+
+    // A YouTube page full screen over the app (the pop-out chat): it's a real
+    // YouTube page, not a frame inside ours, so every chat option works, with
+    // the app's own login. Done / Back closes it; Browser opens it outside.
+    private void showOverlay(String url, boolean isSignIn) {
         if (signInLayer != null) return;
         signInDone = false;
+        overlayIsSignIn = isSignIn;
+        overlayStartedSignedIn = isSignedIn();
         signInLayer = new LinearLayout(this);
         signInLayer.setOrientation(LinearLayout.VERTICAL);
         signInLayer.setBackgroundColor(BG);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
         Button done = new Button(this);
         done.setText("Done");
         done.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) { closeSignIn(); }
         });
+        bar.addView(done, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (!isSignIn) {
+            Button outside = new Button(this);
+            outside.setText("Open in browser");
+            outside.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String now = signInWeb != null ? signInWeb.getUrl() : null;
+                    if (now != null) openOutside(Uri.parse(now));
+                    closeSignIn();
+                }
+            });
+            bar.addView(outside, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        }
         signInWeb = new WebView(this);
         WebSettings s = signInWeb.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
         CookieManager.getInstance().setAcceptThirdPartyCookies(signInWeb, true);
-        signInWeb.setWebViewClient(new WebViewClient() {
+        signInWeb.setWebChromeClient(youtubeChrome(isSignIn ? "signin" : "fullchat"));
+        signInWeb.setWebViewClient(new LoggingClient(isSignIn ? "signin" : "fullchat") {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
-                // The whole sign-in flow stays in this page. App links (intent://,
-                // vnd.youtube://) would leave the app: ignore them.
-                String sc = req.getUrl().getScheme() == null ? "" : req.getUrl().getScheme().toLowerCase();
-                return !(sc.equals("https") || sc.equals("http"));
+                Uri u = req.getUrl();
+                // App links (intent://, vnd.youtube://) would leave the app: ignore them.
+                String sc = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+                if (!(sc.equals("https") || sc.equals("http"))) return true;
+                if (overlayIsSignIn || !req.isForMainFrame()) return false;
+                // Chat page: YouTube / Google pages (incl. sign-in) stay here,
+                // links people post in chat open in the browser.
+                String h = u.getHost() == null ? "" : u.getHost().toLowerCase();
+                if (h.equals("youtube.com") || h.endsWith(".youtube.com") || h.endsWith(".google.com") || h.equals("google.com")) return false;
+                openOutside(u);
+                return true;
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                if (!overlayIsSignIn) return;
                 Uri u = Uri.parse(url);
                 String host = u.getHost() == null ? "" : u.getHost();
                 String path = u.getPath() == null ? "" : u.getPath();
@@ -236,13 +395,13 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        signInLayer.addView(done, new LinearLayout.LayoutParams(
+        signInLayer.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         signInLayer.addView(signInWeb, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(signInLayer, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        signInWeb.loadUrl(SIGN_IN_URL);
+        signInWeb.loadUrl(url);
     }
 
     private void closeSignIn() {
@@ -257,7 +416,9 @@ public class MainActivity extends Activity {
             public void run() { w.destroy(); }
         });
         CookieManager.getInstance().flush();
-        tellPageAccount(isSignedIn());
+        boolean now = isSignedIn();
+        // Reload the chats only when the login actually changed (or after Sign in).
+        if (overlayIsSignIn || now != overlayStartedSignedIn) tellPageAccount(now);
     }
 
     private boolean isSignedIn() {
@@ -278,6 +439,7 @@ public class MainActivity extends Activity {
     }
 
     private void tellPageAccount(boolean signedIn) {
+        reloadPanels();
         web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.accountChanged && MultiStreamApp.accountChanged("
                 + signedIn + ")", null);
     }
@@ -338,6 +500,101 @@ public class MainActivity extends Activity {
         });
     }
 
+    // ------------------------------------------------- native YouTube panels
+    private void openPanel(String id, String url) {
+        Panel p = panels.get(id);
+        if (p != null) {
+            if (!url.equals(p.url)) { p.url = url; p.view.loadUrl(url); }
+            return;
+        }
+        p = new Panel();
+        p.url = url;
+        p.clip = new FrameLayout(this);            // clips the page to the visible part
+        p.view = new WebView(this);
+        p.view.setBackgroundColor(BG);
+        WebSettings s = p.view.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(p.view, true);
+        p.view.setWebChromeClient(youtubeChrome("chat"));
+        p.view.getSettings().setSupportMultipleWindows(true);
+        p.view.setWebViewClient(new LoggingClient("chat") {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                Uri u = req.getUrl();
+                String sc = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+                if (!(sc.equals("https") || sc.equals("http"))) return true;      // app links: ignore
+                if (!req.isForMainFrame()) return false;
+                if (isSignInLink(u)) { showSignIn(); return true; }             // sign in full screen
+                String h = u.getHost() == null ? "" : u.getHost().toLowerCase();
+                if (h.equals("youtube.com") || h.endsWith(".youtube.com")) return false;
+                openOutside(u);                                                  // links posted in chat
+                return true;
+            }
+        });
+        p.clip.addView(p.view, new FrameLayout.LayoutParams(1, 1));
+        p.clip.setVisibility(View.GONE);
+        panelLayer.addView(p.clip, new FrameLayout.LayoutParams(1, 1));
+        panels.put(id, p);
+        p.view.loadUrl(url);
+    }
+
+    /** "id,show,clipX,clipY,clipW,clipH,pageX,pageY,pageW,pageH;..." in screen pixels. */
+    private void placePanels(String msg) {
+        Set<String> seen = new HashSet<String>();
+        if (msg != null && msg.length() > 0) {
+            for (String part : msg.split(";")) {
+                String[] f = part.split(",");
+                if (f.length != 10) continue;
+                Panel p = panels.get(f[0]);
+                if (p == null) continue;
+                seen.add(f[0]);
+                try {
+                    boolean show = "1".equals(f[1]);
+                    int cx = Integer.parseInt(f[2]), cy = Integer.parseInt(f[3]);
+                    int cw = Integer.parseInt(f[4]), ch = Integer.parseInt(f[5]);
+                    int ox = Integer.parseInt(f[6]), oy = Integer.parseInt(f[7]);
+                    int fw = Integer.parseInt(f[8]), fh = Integer.parseInt(f[9]);
+                    if (!show || cw < 2 || ch < 2) { p.clip.setVisibility(View.GONE); continue; }
+                    if (cw != p.cw || ch != p.ch) {
+                        p.cw = cw; p.ch = ch;
+                        p.clip.setLayoutParams(new FrameLayout.LayoutParams(cw, ch));
+                    }
+                    if (fw != p.fw || fh != p.fh) {           // only resizes when the chat's size changes,
+                        p.fw = fw; p.fh = fh;                 // not while scrolling (no re-layout jank)
+                        p.view.setLayoutParams(new FrameLayout.LayoutParams(fw, fh));
+                    }
+                    p.clip.setX(cx);
+                    p.clip.setY(cy);
+                    p.view.setX(ox);
+                    p.view.setY(oy);
+                    p.clip.setVisibility(View.VISIBLE);
+                } catch (NumberFormatException ignored) {
+                    p.clip.setVisibility(View.GONE);
+                }
+            }
+        }
+        for (Map.Entry<String, Panel> e : panels.entrySet()) {
+            if (!seen.contains(e.getKey())) e.getValue().clip.setVisibility(View.GONE);
+        }
+    }
+
+    private void closePanel(String id) {
+        Panel p = panels.remove(id);
+        if (p == null) return;
+        panelLayer.removeView(p.clip);
+        p.view.destroy();
+    }
+
+    private void closeAllPanels() {
+        for (String id : new ArrayList<String>(panels.keySet())) closePanel(id);
+    }
+
+    private void reloadPanels() {
+        for (Panel p : panels.values()) p.view.reload();
+    }
+
     // ------------------------------------------------------------ PiP
     private boolean pipSupported() {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -375,6 +632,7 @@ public class MainActivity extends Activity {
     public void onPictureInPictureModeChanged(boolean isInPip, Configuration newConfig) {
         super.onPictureInPictureModeChanged(isInPip, newConfig);
         inPip = isInPip;
+        panelLayer.setVisibility(isInPip ? View.GONE : View.VISIBLE);   // no chats in the tiny window
         root.requestApplyInsets();
         web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.setPip(" + isInPip + ")", null);
     }
@@ -458,6 +716,56 @@ public class MainActivity extends Activity {
             });
         }
 
+        /** Draw a YouTube page (a chat) natively; the page then sends where. */
+        @JavascriptInterface
+        public void panelOpen(final String id, final String url) {
+            if (id == null || !id.matches("[A-Za-z0-9_-]{1,40}") || url == null || !isYouTubePage(url)) return;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() { openPanel(id, url); }
+            });
+        }
+
+        @JavascriptInterface
+        public void panelPlace(final String msg) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() { placePanels(msg); }
+            });
+        }
+
+        @JavascriptInterface
+        public void panelClose(final String id) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() { closePanel(id); }
+            });
+        }
+
+        @JavascriptInterface
+        public void panelCloseAll() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() { closeAllPanels(); }
+            });
+        }
+
+        /** Recent chat errors etc., for the user to copy and send. */
+        @JavascriptInterface
+        public String debugInfo() {
+            return MainActivity.this.debugInfo();
+        }
+
+        /** Opens a YouTube page (the pop-out chat) full screen inside the app. */
+        @JavascriptInterface
+        public void openChat(final String url) {
+            if (url == null || !isYouTubePage(url)) return;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() { showOverlay(url, false); }
+            });
+        }
+
         /** The downloaded text for id (once; frees it). */
         @JavascriptInterface
         public String ytFetchTake(String id) {
@@ -471,6 +779,7 @@ public class MainActivity extends Activity {
     protected void onStart() {
         super.onStart();
         web.onResume();
+        for (Panel p : panels.values()) p.view.onResume();
         handler.removeCallbacks(poll);
         handler.post(poll);
     }
@@ -481,7 +790,10 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(poll);
         CookieManager.getInstance().flush();   // keep the YouTube login if Android closes the app
         // Still showing in a PiP window? Keep playing. Otherwise the app is hidden.
-        if (!isInPictureInPictureMode()) web.onPause();
+        if (!isInPictureInPictureMode()) {
+            web.onPause();
+            for (Panel p : panels.values()) p.view.onPause();
+        }
     }
 
     @Override
@@ -509,6 +821,8 @@ public class MainActivity extends Activity {
         handler.removeCallbacks(poll);
         if (signInWeb != null) signInWeb.destroy();
         net.shutdownNow();
+        for (Panel p : panels.values()) p.view.destroy();
+        panels.clear();
         web.destroy();
         super.onDestroy();
     }
