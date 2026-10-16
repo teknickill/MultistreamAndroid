@@ -121,6 +121,9 @@ public class MainActivity extends Activity {
                 if (!req.isForMainFrame()) return false;           // players and chats load normally
                 Uri u = req.getUrl();
                 if (siteHost != null && siteHost.equalsIgnoreCase(u.getHost())) return false;
+                // YouTube's own "Sign in" (e.g. inside a chat): sign in to THIS app,
+                // not the phone's browser, or the chats never see the login.
+                if (isSignInLink(u)) { showSignIn(); return true; }
                 openOutside(u);
                 return true;
             }
@@ -157,7 +160,8 @@ public class MainActivity extends Activity {
                 catcher.setWebViewClient(new WebViewClient() {
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
-                        openOutside(req.getUrl());
+                        if (isSignInLink(req.getUrl())) showSignIn();
+                        else openOutside(req.getUrl());
                         catcher.destroy();
                         return true;
                     }
@@ -171,6 +175,17 @@ public class MainActivity extends Activity {
 
         if (savedInstanceState != null) web.restoreState(savedInstanceState);
         else web.loadUrl(BuildConfig.SITE_URL);
+    }
+
+    /** Google / YouTube sign-in pages. */
+    private static boolean isSignInLink(Uri u) {
+        String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+        String host = u.getHost() == null ? "" : u.getHost().toLowerCase();
+        String path = u.getPath() == null ? "" : u.getPath();
+        if (!scheme.equals("https") && !scheme.equals("http")) return false;
+        if (host.equals("accounts.google.com") || host.equals("accounts.youtube.com")) return true;
+        boolean yt = host.equals("youtube.com") || host.endsWith(".youtube.com");
+        return yt && (path.startsWith("/signin") || path.startsWith("/ServiceLogin") || path.startsWith("/logout"));
     }
 
     private void openOutside(Uri u) {
@@ -204,7 +219,10 @@ public class MainActivity extends Activity {
         signInWeb.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
-                return false;   // the whole sign-in flow stays in this page
+                // The whole sign-in flow stays in this page. App links (intent://,
+                // vnd.youtube://) would leave the app: ignore them.
+                String sc = req.getUrl().getScheme() == null ? "" : req.getUrl().getScheme().toLowerCase();
+                return !(sc.equals("https") || sc.equals("http"));
             }
 
             @Override
