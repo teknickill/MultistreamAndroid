@@ -17,6 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Works whether the project is at the top of the repo or in a subfolder
+      # (e.g. android-app/): finds the folder that has settings.gradle.
+      - name: Find the Android project
+        run: |
+          f=$(git ls-files | grep -E '(^|/)settings\.gradle(\.kts)?$' | head -1)
+          if [ -z "$f" ]; then
+            echo "::error::No settings.gradle in this repo. Upload the files from the android-app folder (settings.gradle, build.gradle, app/...)."
+            git ls-files | head -50
+            exit 1
+          fi
+          dir=$(dirname "$f")
+          echo "Android project folder: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -35,6 +49,7 @@ jobs:
           gradle-version: '8.9'
 
       - name: Signing key
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -45,10 +60,12 @@ jobs:
             "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > keystore.properties
 
       - name: Build
+        working-directory: ${{ env.PROJECT_DIR }}
         run: gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: Rename
-        run: cp app/build/outputs/apk/release/app-release.apk MultiStream.apk
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/MultiStream.apk"
 
       - uses: actions/upload-artifact@v4
         with:
