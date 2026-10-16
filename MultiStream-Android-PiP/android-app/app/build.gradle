@@ -20,7 +20,7 @@ android {
         versionCode 1
         versionName '1.0'
         // The site this app shows. Change it if you move the server.
-        buildConfigField 'String', 'SITE_URL', '"https://multistream-2erp.onrender.com/"'
+        buildConfigField 'String', 'SITE_URL', '"https://ytmulti.onrender.com/"'
     }
 
     buildFeatures { buildConfig true }
