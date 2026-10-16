@@ -523,7 +523,10 @@ public class MainActivity extends Activity {
                 if (inPip || fullscreenView != null) {
                     v.setPadding(0, 0, 0, 0);
                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                    // ime(): the keyboard. The page shrinks above it instead of being
+                    // covered (Android 15 no longer does this by itself).
+                    Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+                            | WindowInsets.Type.ime());
                     v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
                 } else {
                     v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
