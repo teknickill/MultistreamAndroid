@@ -49,13 +49,15 @@ Every push to `main` builds a new APK the same way.
 | Open on YouTube / pop-out chat | Opens in the YouTube app or your browser |
 | YouTube player's full-screen button | Full screen inside the app |
 | App fully hidden (no PiP window) | Playback is up to YouTube's player, which normally pauses. This app doesn't work around that |
+| Search / @handle lookups | Done on the phone: the app downloads the youtube.com page itself (only https youtube.com pages; your YouTube login isn't sent) and the website reads it. No server, no API key |
+| 👤 YouTube account (chat) | Sign in / out of YouTube for the chats. The login is the app's own and is saved across restarts |
 
 PiP can be turned off per app by the phone (Settings → Apps → MultiStream →
 Picture-in-picture). If the button does nothing, check that switch.
 
 ## Settings
 
-- **Site address:** `app/build.gradle` → `SITE_URL`. Change it if your Render URL changes.
+- **Site address:** `app/build.gradle` → `SITE_URL`. Change it when you move to the Render Static Site (new `.onrender.com` address), then commit so the Action builds a new APK.
 - **App ID:** `com.superbased.multistream` (`applicationId`). Keep it once installed;
   changing it makes a separate app.
 - **Version:** bump `versionCode` (1, 2, 3…) for every new APK you install over the old one.
