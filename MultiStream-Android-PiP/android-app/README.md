@@ -50,7 +50,7 @@ Every push to `main` builds a new APK the same way.
 | YouTube player's full-screen button | Full screen inside the app |
 | App fully hidden (no PiP window) | Playback is up to YouTube's player, which normally pauses. This app doesn't work around that |
 | Search / @handle lookups | Done on the phone: the app downloads the youtube.com page itself (only https youtube.com pages; your YouTube login isn't sent) and the website reads it. No server, no API key |
-| ▶ Browse YouTube (+ Add sheet / start screen) | YouTube's own site full screen in the app, with your login: home feed, subscriptions, search. **+ Add to MultiStream** adds the video, live stream or channel you're on. Back goes back inside YouTube; **Done** closes it |
+| ▶ (red button, top bar) | YouTube's own site full screen in the app, with your login: home feed, subscriptions, search. **+ Add to MultiStream** adds the video, live stream or channel you're on. **Done** / Back hides it (paused) — ▶ brings you back where you left off |
 | Live chats | Drawn by the app as YouTube's own chat page (not a frame), so every chat option works with the app's login. They step aside while a menu or dialog is open, and hide in PiP. ↗ opens the chat full screen. **Signed out** chat mode uses the old embedded chat |
 | 👤 YouTube account (chat) | Sign in / out of YouTube for the chats. The login is the app's own and is saved across restarts |
 

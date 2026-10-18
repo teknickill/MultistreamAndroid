@@ -263,7 +263,7 @@ public class MainActivity extends Activity {
                 root.addView(view, new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 web.setVisibility(View.GONE);
-                panelLayer.bringToFront();          // a full-screen stream keeps its chat
+                if (!browseShowing()) panelLayer.bringToFront();   // a full-screen stream keeps its chat
                 if (signInLayer != null) signInLayer.bringToFront();
                 setSystemBarsHidden(true);
             }
@@ -330,11 +330,96 @@ public class MainActivity extends Activity {
     // A YouTube page full screen over the app (the pop-out chat): it's a real
     // YouTube page, not a frame inside ours, so every chat option works, with
     // the app's own login. Done / Back closes it; Browser opens it outside.
-    private void showOverlay(String url, boolean isSignIn) { showOverlay(url, isSignIn, false); }
-
     // Browse: YouTube's own mobile site (home feed, subscriptions, search) with
     // the app's login, plus "+ Add to MultiStream" for the video/channel on screen.
-    private void showBrowse() { showOverlay("https://m.youtube.com/", false, true); }
+    // It stays loaded when hidden, so coming back is where you left off.
+    private LinearLayout browseLayer;
+    private WebView browseWeb;
+
+    private boolean browseShowing() {
+        return browseLayer != null && browseLayer.getVisibility() == View.VISIBLE;
+    }
+
+    private void showBrowse() {
+        if (browseLayer != null) {
+            browseLayer.setVisibility(View.VISIBLE);
+            browseLayer.bringToFront();
+            browseWeb.onResume();
+            return;
+        }
+        browseLayer = new LinearLayout(this);
+        browseLayer.setOrientation(LinearLayout.VERTICAL);
+        browseLayer.setBackgroundColor(BG);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        Button done = new Button(this);
+        done.setText("Done");
+        done.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) { hideBrowse(); }
+        });
+        Button add = new Button(this);
+        add.setText("+ Add to MultiStream");
+        add.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String now = browseWeb != null ? browseWeb.getUrl() : null;
+                if (now == null) return;
+                // The page decides: a video/live/channel page is added; anything else gets a hint.
+                web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.addFromApp && MultiStreamApp.addFromApp("
+                        + jsString(now) + ")", new android.webkit.ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String result) {
+                        if ("\"added\"".equals(result) || "\"dupe\"".equals(result)) hideBrowse();
+                        else if ("\"full\"".equals(result)) Toast.makeText(MainActivity.this,
+                                "Up to 16 streams at once — remove one first.", Toast.LENGTH_SHORT).show();
+                        else Toast.makeText(MainActivity.this,
+                                "Open a video, live stream or channel first, then tap Add.", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
+        bar.addView(done, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(add, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f));
+        browseWeb = new WebView(this);
+        browseWeb.setBackgroundColor(BG);
+        WebSettings s = browseWeb.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setSupportMultipleWindows(true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(browseWeb, true);
+        browseWeb.setWebChromeClient(youtubeChrome("browse"));
+        browseWeb.setWebViewClient(new LoggingClient("browse") {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                Uri u = req.getUrl();
+                String sc = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+                if (!(sc.equals("https") || sc.equals("http"))) return true;   // app links: stay here
+                if (!req.isForMainFrame()) return false;
+                String h = u.getHost() == null ? "" : u.getHost().toLowerCase();
+                if (h.equals("youtube.com") || h.endsWith(".youtube.com") || h.equals("youtu.be")
+                        || h.equals("google.com") || h.endsWith(".google.com")) return false;
+                openOutside(u);                                                 // other sites: browser
+                return true;
+            }
+        });
+        browseLayer.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        browseLayer.addView(browseWeb, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(browseLayer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        browseWeb.loadUrl("https://m.youtube.com/");
+    }
+
+    // Hidden, not closed: stops whatever YouTube was playing, keeps the page.
+    private void hideBrowse() {
+        if (!browseShowing()) return;
+        browseWeb.evaluateJavascript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})", null);
+        browseWeb.onPause();
+        browseLayer.setVisibility(View.GONE);
+    }
 
     /** Text safe inside a single-quoted JavaScript string. */
     private static String jsString(String v) {
@@ -347,7 +432,7 @@ public class MainActivity extends Activity {
         return b.append("'").toString();
     }
 
-    private void showOverlay(String url, boolean isSignIn, boolean browse) {
+    private void showOverlay(String url, boolean isSignIn) {
         if (signInLayer != null) return;
         signInDone = false;
         overlayIsSignIn = isSignIn;
@@ -364,31 +449,7 @@ public class MainActivity extends Activity {
             public void onClick(View v) { closeSignIn(); }
         });
         bar.addView(done, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        if (browse) {
-            Button add = new Button(this);
-            add.setText("+ Add to MultiStream");
-            add.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    String now = signInWeb != null ? signInWeb.getUrl() : null;
-                    if (now == null) return;
-                    // The page decides: a video/live/channel page is added; anything else gets a hint.
-                    web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.addFromApp && MultiStreamApp.addFromApp("
-                            + jsString(now) + ")", new android.webkit.ValueCallback<String>() {
-                        @Override
-                        public void onReceiveValue(String result) {
-                            // "added" / "dupe" close; anything else: say why, stay here.
-                            if ("\"added\"".equals(result) || "\"dupe\"".equals(result)) closeSignIn();
-                            else if ("\"full\"".equals(result)) Toast.makeText(MainActivity.this,
-                                    "Up to 16 streams at once — remove one first.", Toast.LENGTH_SHORT).show();
-                            else Toast.makeText(MainActivity.this,
-                                    "Open a video, live stream or channel first, then tap Add.", Toast.LENGTH_SHORT).show();
-                        }
-                    });
-                }
-            });
-            bar.addView(add, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f));
-        } else if (!isSignIn) {
+        if (!isSignIn) {
             Button outside = new Button(this);
             outside.setText("Open in browser");
             outside.setOnClickListener(new View.OnClickListener() {
@@ -482,6 +543,7 @@ public class MainActivity extends Activity {
 
     private void tellPageAccount(boolean signedIn) {
         reloadPanels();
+        if (browseWeb != null) browseWeb.reload();
         web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.accountChanged && MultiStreamApp.accountChanged("
                 + signedIn + ")", null);
     }
@@ -675,6 +737,7 @@ public class MainActivity extends Activity {
         super.onPictureInPictureModeChanged(isInPip, newConfig);
         inPip = isInPip;
         panelLayer.setVisibility(isInPip ? View.GONE : View.VISIBLE);   // no chats in the tiny window
+        if (isInPip) hideBrowse();                                       // PiP shows the streams
         root.requestApplyInsets();
         web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.setPip(" + isInPip + ")", null);
     }
@@ -831,6 +894,7 @@ public class MainActivity extends Activity {
         super.onStart();
         web.onResume();
         for (Panel p : panels.values()) p.view.onResume();
+        if (browseShowing()) browseWeb.onResume();
         handler.removeCallbacks(poll);
         handler.post(poll);
     }
@@ -844,6 +908,7 @@ public class MainActivity extends Activity {
         if (!isInPictureInPictureMode()) {
             web.onPause();
             for (Panel p : panels.values()) p.view.onPause();
+            if (browseWeb != null) browseWeb.onPause();
         }
     }
 
@@ -858,6 +923,9 @@ public class MainActivity extends Activity {
         if (signInLayer != null) {
             if (signInWeb.canGoBack()) signInWeb.goBack();
             else closeSignIn();
+        } else if (browseShowing()) {
+            if (browseWeb.canGoBack()) browseWeb.goBack();
+            else hideBrowse();
         } else if (fullscreenView != null) {
             web.getWebChromeClient().onHideCustomView();
         } else if (web.canGoBack()) {
@@ -871,6 +939,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         handler.removeCallbacks(poll);
         if (signInWeb != null) signInWeb.destroy();
+        if (browseWeb != null) browseWeb.destroy();
         net.shutdownNow();
         for (Panel p : panels.values()) p.view.destroy();
         panels.clear();
