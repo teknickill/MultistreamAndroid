@@ -32,6 +32,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -329,7 +330,24 @@ public class MainActivity extends Activity {
     // A YouTube page full screen over the app (the pop-out chat): it's a real
     // YouTube page, not a frame inside ours, so every chat option works, with
     // the app's own login. Done / Back closes it; Browser opens it outside.
-    private void showOverlay(String url, boolean isSignIn) {
+    private void showOverlay(String url, boolean isSignIn) { showOverlay(url, isSignIn, false); }
+
+    // Browse: YouTube's own mobile site (home feed, subscriptions, search) with
+    // the app's login, plus "+ Add to MultiStream" for the video/channel on screen.
+    private void showBrowse() { showOverlay("https://m.youtube.com/", false, true); }
+
+    /** Text safe inside a single-quoted JavaScript string. */
+    private static String jsString(String v) {
+        StringBuilder b = new StringBuilder("'");
+        for (char c : v.toCharArray()) {
+            if (c == '\\' || c == '\'') b.append('\\').append(c);
+            else if (c < 0x20 || c == 0x2028 || c == 0x2029 || c == '<') b.append(String.format("\\u%04x", (int) c));
+            else b.append(c);
+        }
+        return b.append("'").toString();
+    }
+
+    private void showOverlay(String url, boolean isSignIn, boolean browse) {
         if (signInLayer != null) return;
         signInDone = false;
         overlayIsSignIn = isSignIn;
@@ -346,7 +364,31 @@ public class MainActivity extends Activity {
             public void onClick(View v) { closeSignIn(); }
         });
         bar.addView(done, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        if (!isSignIn) {
+        if (browse) {
+            Button add = new Button(this);
+            add.setText("+ Add to MultiStream");
+            add.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String now = signInWeb != null ? signInWeb.getUrl() : null;
+                    if (now == null) return;
+                    // The page decides: a video/live/channel page is added; anything else gets a hint.
+                    web.evaluateJavascript("window.MultiStreamApp && MultiStreamApp.addFromApp && MultiStreamApp.addFromApp("
+                            + jsString(now) + ")", new android.webkit.ValueCallback<String>() {
+                        @Override
+                        public void onReceiveValue(String result) {
+                            // "added" / "dupe" close; anything else: say why, stay here.
+                            if ("\"added\"".equals(result) || "\"dupe\"".equals(result)) closeSignIn();
+                            else if ("\"full\"".equals(result)) Toast.makeText(MainActivity.this,
+                                    "Up to 16 streams at once — remove one first.", Toast.LENGTH_SHORT).show();
+                            else Toast.makeText(MainActivity.this,
+                                    "Open a video, live stream or channel first, then tap Add.", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            });
+            bar.addView(add, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f));
+        } else if (!isSignIn) {
             Button outside = new Button(this);
             outside.setText("Open in browser");
             outside.setOnClickListener(new View.OnClickListener() {
@@ -754,6 +796,15 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String debugInfo() {
             return MainActivity.this.debugInfo();
+        }
+
+        /** YouTube's own site full screen in the app, with "+ Add to MultiStream". */
+        @JavascriptInterface
+        public void openBrowse() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() { showBrowse(); }
+            });
         }
 
         /** Opens a YouTube page (the pop-out chat) full screen inside the app. */
